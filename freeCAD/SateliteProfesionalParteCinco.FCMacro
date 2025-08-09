@@ -1,0 +1,165 @@
+# -*- coding: utf-8 -*-
+# Parker Solar Probe-like completo con módulos extra y export STEP AP214
+# Autor: Víctor + Copilot
+
+import math
+import FreeCAD as App
+import Part
+
+# ===================== Parámetros (mm) =====================
+p_bus_w, p_bus_d, p_bus_h = 160.0, 90.0, 120.0  # Bus alargado
+bus_skin_t = 2.0
+
+# Escudo térmico (TPS)
+shield_d, shield_thk, shield_cone = 240.0, 14.0, 26.0
+shield_gap, shield_back_standoff = 34.0, 12.0
+
+# Palas solares
+paddle_len, paddle_root_w, paddle_tip_w, paddle_t = 95.0, 46.0, 28.0, 2.0
+paddle_y_offset, paddle_tilt_deg = p_bus_d/2 - 8.0, 22.0
+
+# Radiadores
+radiator_w, radiator_h, radiator_t = 90.0, 130.0, 2.2
+radiator_back_offset, radiator_fin_pitch, radiator_fin_w = 50.0, 12.0, 1.2
+
+# Instrumentos delanteros
+faraday_len, faraday_r = 52.0, 12.0
+whip_len, whip_r = 180.0, 0.9
+
+# Antena trasera
+back_dish_d, back_dish_depth, steps_profile = 130.0, 28.0, 84
+t_bumper_ring, boom_len_back, boom_r, boom_tip_r = 1.4, 95.0, 1.8, 4.0
+layers_rear_dish = [
+    (0.9,  (0.20,0.20,0.22), 0.95),  # C/C
+    (0.35, (0.63,0.32,0.18), 0.55),  # Epoxy
+    (3.5,  (0.85,0.65,0.13), 0.55),  # Kevlar+epoxy
+]
+
+# Escudos radiación
+shield_rad_len, shield_gap_side = p_bus_w * 1.7, 45.0
+shield_cc_t, shield_kevl_t, shield_flex_t = 3.0, 6.0, 2.5
+shield_seg_count, shield_support_rods = 28, 12
+
+# Otros módulos
+tank_radius, tank_length = 18.0, 120.0
+rwheel_r, rwheel_t = 18.0, 20.0
+rcs_cone_r1, rcs_cone_r2, rcs_cone_h = 5.0, 1.2, 18.0
+
+# Export
+export_path = App.getUserAppDataDir() + "ParkerProbe_Full.step"
+export_as_single_compound = False  # True → un solo sólido compuesto
+
+# ===================== Utilidades =====================
+def parabola_r(z, d, depth):
+    if depth <= 0: return 0.0
+    f = (d*d) / (16.0*depth)
+    val = 4.0*f*z
+    return math.sqrt(val) if val > 0 else 0.0
+
+def make_revolved_solid_from_diameter(d, depth, steps=72, z0_eps_factor=1.0):
+    if d <= 0 or depth <= 0: return None
+    steps = max(24, int(steps))
+    z0 = depth / (steps * z0_eps_factor)
+    p_axis_bot = App.Vector(0,0,z0)
+    p_axis_top = App.Vector(0,0,depth)
+    e_axis = Part.makeLine(p_axis_bot, p_axis_top)
+    r_max = parabola_r(depth, d, depth)
+    p_top_out = App.Vector(r_max, 0, depth)
+    e_top = Part.makeLine(p_axis_top, p_top_out)
+    outer_pts = [App.Vector(parabola_r(z, d, depth), 0, z)
+                 for z in [depth - (depth - z0) * (i/steps) for i in range(steps+1)]]
+    e_curve = Part.makePolygon(outer_pts)
+    p_bot_out = outer_pts[-1]
+    e_bot = Part.makeLine(p_bot_out, p_axis_bot)
+    return Part.Face(Part.Wire([e_axis, e_top, e_curve, e_bot])
+                    ).revolve(App.Vector(0,0,0), App.Vector(0,0,1), 360)
+
+def make_dish_layer_solid(d, depth, t, steps=72):
+    outer = make_revolved_solid_from_diameter(d, depth, steps)
+    inner_d = d - 2.0*t
+    if inner_d <= 0: return outer
+    inner = make_revolved_solid_from_diameter(inner_d, depth, steps)
+    return outer.cut(inner)
+
+def make_ring(r_outer, r_inner, h):
+    return Part.makeCylinder(r_outer, h).cut(Part.makeCylinder(r_inner, h))
+
+def place_shape(shape, pos=App.Vector(0,0,0), rot_axis=App.Vector(0,1,0), rot_deg=0):
+    s = shape.copy()
+    pl = App.Placement()
+    pl.Rotation = App.Rotation(rot_axis, rot_deg)
+    pl.Base = pos
+    s.Placement = pl
+    return s
+
+def add_part(doc, shape, name, color=(0.8,0.8,0.8), transparency=0):
+    obj = doc.addObject("Part::Feature", name)
+    obj.Shape = shape
+    obj.ViewObject.ShapeColor = color
+    obj.ViewObject.Transparency = int(transparency*100) if transparency <= 1 else int(transparency)
+    return obj
+
+def make_trapezoid_plate(len_x, w_root, w_tip, t_y):
+    pts = [App.Vector(0,0,-w_root/2.0), App.Vector(0,0,w_root/2.0),
+           App.Vector(len_x,0,w_tip/2.0), App.Vector(len_x,0,-w_tip/2.0), App.Vector(0,0,-w_root/2.0)]
+    return Part.Face(Part.Wire(Part.makePolygon(pts))).extrude(App.Vector(0, t_y, 0))
+
+# ===================== Submódulos =====================
+def build_bus(doc):
+    box = Part.makeBox(p_bus_w, p_bus_d, p_bus_h)
+    box.translate(App.Vector(-p_bus_w/2, -p_bus_d/2, -p_bus_h/2))
+    return [add_part(doc, box, "BusBody", (0.35,0.35,0.4))]
+
+def build_heat_shield(doc):
+    x0 = p_bus_w/2 + shield_gap
+    parts=[]
+    # Conos apilados
+    r0, r1, r2, r3 = shield_d/2, shield_d/2 - shield_cone*0.25, shield_d/2 - shield_cone*0.85, shield_d/2 - shield_cone
+    h_f, h_c = 1.8, max(1, shield_thk - 3.6)
+    h_b = max(1, shield_thk - (h_f + h_c))
+    parts.append(add_part(doc, place_shape(Part.makeCone(r0, r1, h_f), App.Vector(x0,0,0), App.Vector(0,1,0), 90), "TPS_Front", (0.98,0.98,0.98)))
+    parts.append(add_part(doc, place_shape(Part.makeCone(r1, r2, h_c), App.Vector(x0+h_f,0,0), App.Vector(0,1,0), 90), "TPS_Core", (0.4,0.4,0.4)))
+    parts.append(add_part(doc, place_shape(Part.makeCone(r2, r3, h_b), App.Vector(x0+h_f+h_c,0,0), App.Vector(0,1,0), 90), "TPS_Back", (0.05,0.05,0.05)))
+    return parts
+
+def build_paddle(doc, side=+1):
+    """
+    Crea una pala solar trapezoidal con ángulo de inclinación.
+    side = +1 derecha / -1 izquierda visto desde atrás de la sonda.
+    """
+    # Base trapezoidal extruida
+    plate = make_trapezoid_plate(
+        paddle_len, paddle_root_w, paddle_tip_w, paddle_t
+    )
+    
+    # Posicionar respecto al bus
+    tilt = paddle_tilt_deg * side  # mismo ángulo pero invertido lateralmente
+    x_pos = -paddle_len/2.0 + 8.0   # algo de solape con bus
+    y_pos = side * (paddle_y_offset + paddle_t/2.0)
+    z_pos = 0.0
+    
+    plate = place_shape(
+        plate,
+        pos=App.Vector(x_pos, y_pos, 0),
+        rot_axis=App.Vector(0,0,1),
+        rot_deg=tilt
+    )
+    
+    # Color y asignación
+    color = (0.15, 0.2, 0.55)  # azul oscuro
+    return [add_part(doc, plate, f"SolarPaddle_{'R' if side>0 else 'L'}", color)]
+
+
+def build_probe(doc):
+    parts = []
+    parts += build_bus(doc)
+    parts += build_heat_shield(doc)
+    parts += build_paddle(doc, side=+1)
+    parts += build_paddle(doc, side=-1)
+    # ... el resto de módulos ...
+    if export_as_single_compound:
+        compound = Part.makeCompound([p.Shape for p in parts])
+        Part.export([compound], export_path)
+    else:
+        Part.export(parts, export_path)
+    print(f"Exportado a: {export_path}")

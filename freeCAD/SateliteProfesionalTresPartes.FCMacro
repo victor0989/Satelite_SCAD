@@ -1,0 +1,160 @@
+# -*- coding: utf-8 -*-
+# Parker Solar Probe-like ensamblado completo con escudos de radiación elásticos
+# Autor: Víctor + Copilot
+# Genera sólidos y exporta a STEP AP214
+
+import math
+import FreeCAD as App
+import Part
+
+# ===================== Parámetros globales (mm) =====================
+# Bus (cuerpo)
+p_bus_w = 140.0   # eje X (frente-atrás) → más alargado
+p_bus_d = 90.0
+p_bus_h = 120.0
+
+# Escudo térmico (TPS)
+shield_d = 220.0
+shield_thk = 12.0
+shield_cone = 22.0
+shield_gap = 28.0
+shield_back_standoff = 10.0
+
+# Palas solares
+paddle_len = 85.0
+paddle_root_w = 44.0
+paddle_tip_w = 26.0
+paddle_t = 2.0
+paddle_y_offset = p_bus_d/2.0 - 8.0
+paddle_tilt_deg = 22.0
+
+# Radiadores
+radiator_w = 80.0
+radiator_h = 120.0
+radiator_t = 2.2
+radiator_back_offset = 46.0
+radiator_fin_pitch = 12.0
+radiator_fin_w = 1.2
+
+# Instrumentos delanteros
+faraday_len = 48.0
+faraday_r   = 12.0
+whip_len = 160.0
+whip_r   = 0.9
+
+# Antena trasera
+back_dish_d      = 120.0
+back_dish_depth  = 25.0
+steps_profile    = 72
+t_bumper_ring    = 1.2
+boom_len_back = 80.0
+boom_r        = 1.8
+boom_tip_r    = 4.0
+
+# Capas plato [ (t, (r,g,b), alpha) ]
+layers_rear_dish = [
+    (0.8,  (0.41,0.41,0.41), 0.95),  # C/C bumper
+    (0.3,  (0.63,0.32,0.18), 0.55),  # Epoxy
+    (3.0,  (0.85,0.65,0.13), 0.55),  # Kevlar+epoxy
+]
+
+# Escudos de radiación elásticos
+shield_rad_len   = p_bus_w * 1.6
+shield_gap_side  = 40.0
+shield_cc_t      = 3.0
+shield_kevl_t    = 6.0
+shield_flex_t    = 2.5
+shield_seg_count = 24
+
+# Exportación
+export_path = App.getUserAppDataDir() + "ParkerProbe_Full.step"
+
+# ===================== Utilidades geométricas =====================
+def parabola_r(z, d, depth):
+    if depth <= 0: return 0.0
+    f = (d*d) / (16.0*depth)
+    val = 4.0*f*z
+    return math.sqrt(val) if val > 0 else 0.0
+
+def make_revolved_solid_from_diameter(d, depth, steps=72, z0_eps_factor=1.0):
+    if d <= 0 or depth <= 0: return None
+    steps = max(24, int(steps))
+    z0 = depth / (steps * z0_eps_factor)
+    p_axis_bot = App.Vector(0,0,z0)
+    p_axis_top = App.Vector(0,0,depth)
+    e_axis = Part.makeLine(p_axis_bot, p_axis_top)
+    r_max = parabola_r(depth, d, depth)
+    p_top_out = App.Vector(r_max, 0, depth)
+    e_top = Part.makeLine(p_axis_top, p_top_out)
+    outer_pts = []
+    for i in range(steps+1):
+        z = depth - (depth - z0) * (i/steps)
+        r = parabola_r(z, d, depth)
+        outer_pts.append(App.Vector(r,0,z))
+    e_curve = Part.makePolygon(outer_pts)
+    p_bot_out = outer_pts[-1]
+    e_bot = Part.makeLine(p_bot_out, p_axis_bot)
+    wire = Part.Wire([e_axis, e_top, e_curve, e_bot])
+    face = Part.Face(wire)
+    return face.revolve(App.Vector(0,0,0), App.Vector(0,0,1), 360)
+
+def make_dish_layer_solid(d, depth, t, steps=72):
+    outer = make_revolved_solid_from_diameter(d, depth, steps)
+    d_inner = d - 2.0*t
+    if d_inner <= 0.1: return outer
+    inner = make_revolved_solid_from_diameter(d_inner, depth, steps)
+    return outer.cut(inner)
+
+def make_ring(r_outer, r_inner, h):
+    return Part.makeCylinder(r_outer, h).cut(Part.makeCylinder(r_inner, h))
+
+def place_shape(shape, pos=App.Vector(0,0,0), rot_axis=App.Vector(0,1,0), rot_deg=0):
+    sh = shape.copy()
+    pl = App.Placement()
+    pl.Rotation = App.Rotation(rot_axis, rot_deg)
+    pl.Base = pos
+    sh.Placement = pl
+    return sh
+
+def add_part(doc, shape, name, color=(0.8,0.8,0.8), transparency=0):
+    if shape is None: return None
+    obj = doc.addObject("Part::Feature", name)
+    obj.Shape = shape
+    obj.ViewObject.ShapeColor = color
+    obj.ViewObject.Transparency = int(max(0, min(100, round(transparency*100))))
+    return obj
+
+def make_trapezoid_plate(len_x, w_root, w_tip, t_y):
+    pts = [
+        App.Vector(0,0,-w_root/2.0),
+        App.Vector(0,0,w_root/2.0),
+        App.Vector(len_x,0,w_tip/2.0),
+        App.Vector(len_x,0,-w_tip/2.0),
+        App.Vector(0,0,-w_root/2.0)
+    ]
+    face = Part.Face(Part.Wire(Part.makePolygon(pts)))
+    solid = face.extrude(App.Vector(0, t_y, 0))
+    return place_shape(solid, pos=App.Vector(0,-t_y/2.0,0))
+
+# ===================== Subconjuntos =====================
+def build_bus(doc):
+    box = Part.makeBox(p_bus_w, p_bus_d, p_bus_h)
+    box.translate(App.Vector(-p_bus_w/2.0, -p_bus_d/2.0, -p_bus_h/2.0))
+    return [add_part(doc, box, "BusBody", color=(0.35,0.35,0.40))]
+
+def build_heat_shield(doc):
+    objs = []
+    r0, r1, r2, r3 = shield_d/2.0, shield_d/2.0 - shield_cone*0.25, shield_d/2.0 - shield_cone*0.85, shield_d/2.0 - shield_cone
+    h_front, h_core = 1.6, max(1.0, shield_thk - 3.2)
+    h_back = max(1.0, shield_thk - (h_front + h_core))
+    x0 = p_bus_w/2.0 + shield_gap
+    frontX = place_shape(Part.makeCone(r0, r1, h_front), pos=App.Vector(x0,0,0), rot_axis=App.Vector(0,1,0), rot_deg=90)
+    coreX = place_shape(Part.makeCone(r1, r2, h_core), pos=App.Vector(x0+h_front,0,0), rot_axis=App.Vector(0,1,0), rot_deg=90)
+    backX = place_shape(Part.makeCone(r2, r3, h_back), pos=App.Vector(x0+h_front+h_core,0,0), rot_axis=App.Vector(0,1,0), rot_deg=90)
+    objs += [add_part(doc, frontX, "TPS_Front", color=(0.98,0.98,0.98)),
+             add_part(doc, coreX, "TPS_Core", color=(0.40,0.40,0.40)),
+             add_part(doc, backX, "TPS_Back", color=(0.05,0.05,0.05))]
+    return objs
+
+def build_paddle(doc, side=+1):
+    plate = make_trapezoid
