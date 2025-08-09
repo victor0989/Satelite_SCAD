@@ -1,0 +1,385 @@
+# -*- coding: utf-8 -*-
+ bus + TPS + palas + radiadores + instrumentos + antena trasera
+# Genera sólidos y exporta a STEP AP214
+
+import math
+import FreeCAD as App
+import Part
+
+
+# Bus (cuerpo)
+p_bus_w = 90.0   # eje X (frente-atrás)
+p_bus_d = 90.0   # eje Y (lado-lado)
+p_bus_h = 120.0  # eje Z (arriba-abajo)
+bus_skin_t = 2.0
+
+# Escudo térmico (TPS)
+shield_d = 220.0
+shield_thk = 12.0
+shield_cone = 22.0        # controla el estrechamiento radial
+shield_gap = 28.0         # separación entre bus y escudo (dirección +X)
+shield_back_standoff = 10.0
+
+# Palas solares
+paddle_len = 85.0
+paddle_root_w = 44.0
+paddle_tip_w = 26.0
+paddle_t = 2.0
+paddle_y_offset = p_bus_d/2.0 - 8.0
+paddle_tilt_deg = 22.0     # inclinación en torno al eje Z desde +X
+
+# Radiadores
+radiator_w = 80.0
+radiator_h = 120.0
+radiator_t = 2.2
+radiator_back_offset = 46.0
+radiator_fin_pitch = 12.0
+radiator_fin_w = 1.2
+
+# Instrumentos delanteros
+faraday_len = 48.0
+faraday_r   = 12.0
+whip_len = 160.0
+whip_r   = 0.9
+
+# Antena trasera
+back_dish_d      = 120.0     # diámetro del plato
+back_dish_depth  = 25.0      # profundidad de la parábola (eje)
+steps_profile    = 72        # discretización del perfil (>= 36 recomendable)
+t_bumper_ring    = 1.2       # grosor radial del aro toroidal del borde
+boom_len_back = 80.0
+boom_r        = 1.8
+boom_tip_r    = 4.0
+
+# Capas del plato [ (t, (r,g,b), alpha) ] ; colores normalizados 0..1
+layers_rear_dish = [
+    (0.8,  (0.41,0.41,0.41), 0.95),  # C/C bumper - dimgray
+    (0.3,  (0.63,0.32,0.18), 0.55),  # Epoxy unión - sienna
+    (3.0,  (0.85,0.65,0.13), 0.55),  # Kevlar+epoxy - goldenrod
+]
+
+# Exportación
+export_path = App.getUserAppDataDir() + "ParkerProbe.step"  # cambia si quieres
+
+
+def parabola_r(z, d, depth):
+    # r(z) = sqrt(4 f z), con f = d^2 / (16*depth)
+    if depth <= 0: return 0.0
+    f = (d*d) / (16.0*depth)
+    val = 4.0*f*z
+    return math.sqrt(val) if val > 0 else 0.0
+
+def make_revolved_solid_from_diameter(d, depth, steps=72, z0_eps_factor=1.0):
+    """
+    Sólido de revolución (macizo) del volumen bajo la curva r(z), z ∈ [z0, depth].
+    Eje de revolución: Z. Perfil en plano XZ (y=0), x=r(z).
+    """
+    if d <= 0 or depth <= 0:
+        return None
+
+    steps = max(24, int(steps))
+    z0 = depth / (steps * z0_eps_factor)  # evita el eje degenerado
+
+    # Contorno
+    p_axis_bot = App.Vector(0, 0, z0)
+    p_axis_top = App.Vector(0, 0, depth)
+    e_axis = Part.makeLine(p_axis_bot, p_axis_top)
+
+    r_max = parabola_r(depth, d, depth)
+    p_top_out = App.Vector(r_max, 0, depth)
+    e_top = Part.makeLine(p_axis_top, p_top_out)
+
+    outer_pts = []
+    for i in range(steps+1):
+        z = depth - (depth - z0) * (i/steps)
+        r = parabola_r(z, d, depth)
+        outer_pts.append(App.Vector(r, 0, z))
+    e_curve = Part.makePolygon(outer_pts)
+
+    p_bot_out = outer_pts[-1]
+    e_bot = Part.makeLine(p_bot_out, p_axis_bot)
+
+    wire = Part.Wire([e_axis, e_top, e_curve, e_bot])
+    face = Part.Face(wire)
+    solid = face.revolve(App.Vector(0,0,0), App.Vector(0,0,1), 360)
+    return solid
+
+def make_dish_layer_solid(d, depth, t, steps=72):
+    """
+    Capa del plato como sólido: outer - inner (d_inner ≈ d - 2*t)
+    """
+    d_eff = max(d, 0.1)
+    outer = make_revolved_solid_from_diameter(d_eff, depth, steps)
+    d_inner = d_eff - 2.0*t
+    if d_inner <= 0.1:
+        return outer
+    inner = make_revolved_solid_from_diameter(d_inner, depth, steps)
+    return outer.cut(inner)
+
+def make_ring(r_outer, r_inner, h):
+    outer = Part.makeCylinder(r_outer, h)
+    inner = Part.makeCylinder(r_inner, h)
+    return outer.cut(inner)
+
+def place_shape(shape, pos=App.Vector(0,0,0), rot_axis=App.Vector(0,1,0), rot_deg=0):
+    sh = shape.copy()
+    pl = App.Placement()
+    pl.Rotation = App.Rotation(rot_axis, rot_deg)
+    pl.Base = pos
+    sh.Placement = pl
+    return sh
+
+def add_part(doc, shape, name, color=(0.8,0.8,0.8), transparency=0):
+    if shape is None: return None
+    obj = doc.addObject("Part::Feature", name)
+    obj.Shape = shape
+    try:
+        obj.ViewObject.ShapeColor = color
+        obj.ViewObject.Transparency = int(max(0, min(100, round(transparency*100))))
+    except Exception:
+        pass
+    return obj
+
+def make_trapezoid_plate(len_x, w_root, w_tip, t_y):
+    """
+    Placa trapezoidal en plano XZ, extruida en Y (centrada en Y).
+    """
+    x0, x1 = 0.0, len_x
+    z0 = -w_root/2.0
+    z1 =  w_root/2.0
+    z2 =  w_tip/2.0
+    z3 = -w_tip/2.0
+    pts = [
+        App.Vector(x0,0,z0), App.Vector(x0,0,z1),
+        App.Vector(x1,0,z2), App.Vector(x1,0,z3),
+        App.Vector(x0,0,z0)
+    ]
+    wire = Part.Wire(Part.makePolygon(pts))
+    face = Part.Face(wire)
+    solid = face.extrude(App.Vector(0, t_y, 0))
+    # centrar en Y
+    return place_shape(solid, pos=App.Vector(0,-t_y/2.0,0), rot_axis=App.Vector(1,0,0), rot_deg=0)
+
+# ===================== Subconjuntos =====================
+def build_bus(doc):
+    # Caja del bus centrada en el origen
+    box = Part.makeBox(p_bus_w, p_bus_d, p_bus_h)
+    # Centrar: FreeCAD box arranca en (0,0,0) con eje +Z en altura
+    box.translate(App.Vector(-p_bus_w/2.0, -p_bus_d/2.0, -p_bus_h/2.0))
+    return [add_part(doc, box, "BusBody", color=(0.35,0.35,0.40), transparency=0)]
+
+def build_heat_shield(doc):
+    objs = []
+    # Frustum simplificado por capas; eje Z → rotar a eje X
+    r0 = shield_d/2.0
+    r1 = r0 - shield_cone*0.25
+    r2 = r0 - shield_cone*0.85
+    r3 = r0 - shield_cone
+
+    h_front = 1.6
+    h_core  = max(1.0, shield_thk - 3.2)
+    h_back  = max(1.0, shield_thk - (h_front + h_core))  # ajusta para que sume shield_thk
+
+    x0 = p_bus_w/2.0 + shield_gap  # plano trasero del escudo
+    # Construir frustums con base en z=0, altura=h, rotados a X y desplazados a x0
+    front = Part.makeCone(r0, r1, h_front)
+    core  = Part.makeCone(r1, r2, h_core)
+    back  = Part.makeCone(r2, r3, h_back)
+
+    frontX = place_shape(front, pos=App.Vector(x0,0,0), rot_axis=App.Vector(0,1,0), rot_deg=90)
+    coreX  = place_shape(core,  pos=App.Vector(x0+h_front,0,0), rot_axis=App.Vector(0,1,0), rot_deg=90)
+    backX  = place_shape(back,  pos=App.Vector(x0+h_front+h_core,0,0), rot_axis=App.Vector(0,1,0), rot_deg=90)
+
+    objs.append(add_part(doc, frontX, "TPS_Front", color=(0.98,0.98,0.98), transparency=0))
+    objs.append(add_part(doc, coreX,  "TPS_Core",  color=(0.40,0.40,0.40), transparency=0))
+    objs.append(add_part(doc, backX,  "TPS_Back",  color=(0.05,0.05,0.05), transparency=0))
+
+    # Aro soporte y viguetas detrás del escudo
+    ring_Z = make_ring(r_outer=(shield_d/2.0 - 12.0), r_inner=(shield_d/2.0 - 18.0), h=3.0)
+    ring_X = place_shape(ring_Z, pos=App.Vector(x0 - shield_back_standoff, 0, 0), rot_axis=App.Vector(0,1,0), rot_deg=90)
+    objs.append(add_part(doc, ring_X, "TPS_SupportRing", color=(0.75,0.75,0.75), transparency=0))
+
+    # 6 viguetas distribuidas a 60°
+    for a in range(0,360,60):
+        # Colocar cilindro de largo standoff+4, radio 2.6, desde el anillo hacia el bus
+        cyl = Part.makeCylinder(2.6, shield_back_standoff + 4.0)
+        # Eje del cilindro inicialmente en +Z; rotarlo a +X:
+        cylX = place_shape(cyl, rot_axis=App.Vector(0,1,0), rot_deg=90)
+        # Orientación radial alrededor de X
+        rotZ = App.Rotation(App.Vector(1,0,0), 0)  # ya en X
+        # Posicionar en el perímetro del anillo
+        y = (shield_d/2.0 - 18.0) * math.cos(math.radians(a))
+        z = (shield_d/2.0 - 18.0) * math.sin(math.radians(a))
+        cylX.translate(App.Vector(x0 - shield_back_standoff, y, z))
+        objs.append(add_part(doc, cylX, f"TPS_Strut_{a}", color=(0.75,0.75,0.75), transparency=0))
+
+    # Sensores en el borde del escudo (esquinas doradas)
+    for a in range(0,360,45):
+        ang = math.radians(a)
+        y = (shield_d/2.0 - 6.0) * math.cos(ang)
+        z = (shield_d/2.0 - 6.0) * math.sin(ang)
+        s = Part.makeSphere(2.2)
+        s.translate(App.Vector(x0 + shield_thk + 2.0, y, z))
+        objs.append(add_part(doc, s, f"TPS_RimSensor_{a}", color=(1.0,0.9,0.2), transparency=0))
+
+    return [o for o in objs if o is not None]
+
+def build_paddle(doc, side=+1):
+    """
+    side = +1 para Y positivo, -1 para Y negativo
+    """
+    plate = make_trapezoid_plate(paddle_len, paddle_root_w, paddle_tip_w, paddle_t)
+    # Hinge
+    hinge = Part.makeCylinder(2.2, 4.0, App.Vector(0,0,0), App.Vector(1,0,0))
+    hinge = place_shape(hinge, pos=App.Vector(0,0,0), rot_axis=App.Vector(0,1,0), rot_deg=90)
+
+    # Combinar (no booleano, solo colocar)
+    # Orientación: partir desde el lado del bus, rotar tilt en Z y mover a su posición
+    tilt = paddle_tilt_deg * (1 if side>0 else -1)
+    # Rotaciones: ya está en plano XZ; inclinamos en Z para "barrer" hacia ±Y
+    plate_rot = place_shape(plate, rot_axis=App.Vector(0,0,1), rot_deg=tilt)
+    hinge_rot = place_shape(hinge, rot_axis=App.Vector(0,0,1), rot_deg=tilt)
+
+    # Ubicación: cerca del borde frontal del bus
+    x = p_bus_w/2.0 - 6.0
+    y = side*(paddle_y_offset + paddle_t/2.0 + 2.0)
+    z = 0.0
+
+    plate_rot.translate(App.Vector(x, y, z))
+    hinge_rot.translate(App.Vector(x, y, z))
+
+    o1 = add_part(doc, plate_rot, f"Paddle_{'P' if side>0 else 'N'}", color=(0.03,0.09,0.30), transparency=0)
+    o2 = add_part(doc, hinge_rot, f"PaddleHinge_{'P' if side>0 else 'N'}", color=(0.75,0.75,0.75), transparency=0)
+    return [o for o in [o1,o2] if o is not None]
+
+def build_radiator(doc, side=+1):
+    """
+    Radiador plano con aletas, detrás del bus
+    """
+    # Placa principal (plano YZ, centrada)
+    plate = Part.makeBox(radiator_w, radiator_t, radiator_h)
+    plate.translate(App.Vector(-radiator_w/2.0, -radiator_t/2.0, -radiator_h/2.0))
+    # Fijar posición
+    x = -p_bus_w/2.0 - radiator_back_offset
+    y = side*(p_bus_d/2.0 - 8.0)
+    z = 0.0
+    plate.translate(App.Vector(x, y, z))
+    objs = [add_part(doc, plate, f"RadiatorPlate_{'P' if side>0 else 'N'}", color=(0.92,0.92,1.0), transparency=0)]
+
+    # Aletas
+    n = int(radiator_w / radiator_fin_pitch)
+    for i in range(-n//2, n//2+1):
+        fin = Part.makeBox(radiator_fin_w, radiator_t+0.2, max(10.0, radiator_h-6.0))
+        fin.translate(App.Vector(i*radiator_fin_pitch - radiator_fin_w/2.0, -0.1, -fin.BoundBox.ZLength/2.0))
+        fin.translate(App.Vector(x, y, 0))
+        objs.append(add_part(doc, fin, f"RadiatorFin_{side}_{i}", color=(0.85,0.85,0.95), transparency=0))
+    return [o for o in objs if o is not None]
+
+def build_faraday_cup(doc):
+    x0 = p_bus_w/2.0 + shield_gap + shield_thk + 20.0
+    base = Part.makeCylinder(faraday_r*0.6, faraday_len*0.6, App.Vector(x0,0,0), App.Vector(1,0,0))
+    neck = Part.makeCone(faraday_r*0.6, faraday_r*0.25, faraday_len*0.4, App.Vector(x0+faraday_len*0.6,0,0), App.Vector(1,0,0))
+    back = Part.makeCylinder(faraday_r*0.35, 6.0, App.Vector(x0-6.0,0,0), App.Vector(1,0,0))
+    return [add_part(doc, base, "FaradayCup_Base", color=(0.75,0.75,0.80), transparency=0),
+            add_part(doc, neck, "FaradayCup_Neck", color=(0.75,0.75,0.80), transparency=0),
+            add_part(doc, back, "FaradayCup_Back", color=(0.75,0.75,0.80), transparency=0)]
+
+def build_whips(doc):
+    objs = []
+    x0 = p_bus_w/2.0 + shield_gap
+    for a in [-35, 35, 145, -145]:
+        angY = math.radians(a)
+        # Punto de anclaje en el borde del escudo
+        y = (shield_d/2.0 - 10.0) * math.cos(angY)
+        z = (shield_d/2.0 - 10.0) * math.sin(angY)
+        # Inclinación ~10° hacia afuera
+        axis = App.Vector(math.cos(math.radians(10)), math.sin(math.radians(10)), 0)
+        whip = Part.makeCylinder(whip_r, whip_len, App.Vector(x0 + shield_thk, y, z), App.Vector(1,0,0))
+        # Pequeña rotación hacia fuera (alrededor de Z) y alrededor de X
+        whip = place_shape(whip, rot_axis=App.Vector(0,0,1), rot_deg=a)
+        whip.translate(App.Vector(0,0,0))  # pos ya aplicada
+        objs.append(add_part(doc, whip, f"Whip_{a}", color=(0.85,0.85,0.90), transparency=0))
+    return objs
+
+def build_cooling_loops(doc):
+    objs = []
+    # Tramos rectos simples lado ±Y
+    for s in (-1, +1):
+        # Segmento corto cerca del escudo
+        x1 =  p_bus_w/2.0 + shield_gap - 12.0
+        y  =  s*(p_bus_d/2.0 - 8.0)
+        z  =  0.0
+        seg1 = Part.makeCylinder(1.2, 20.0, App.Vector(x1, y, z), App.Vector(1,0,0))
+        objs.append(add_part(doc, seg1, f"Cool_Short_{s}", color=(0.75,0.75,0.8), transparency=0))
+
+        # Segmento largo hacia radiador trasero
+        x2 = -p_bus_w/2.0 - radiator_back_offset + 6.0
+        L  = (p_bus_w/2.0 + radiator_back_offset - 6.0) + (p_bus_w/2.0 - 10.0)
+        seg2 = Part.makeCylinder(1.2, L, App.Vector(x2, y, z), App.Vector(1,0,0))
+        objs.append(add_part(doc, seg2, f"Cool_Long_{s}", color=(0.75,0.75,0.8), transparency=0))
+    return objs
+
+def build_rear_assembly(doc):
+    objs = []
+    # Posición trasera: eje de la antena hacia +X
+    apex_x = -p_bus_w/2.0 - 24.0
+    apex = App.Vector(apex_x, 0, 0)
+
+    # 1) Plato multicapa
+    t_cum = 0.0
+    for i, (t_i, rgb, alpha) in enumerate(layers_rear_dish):
+        d_eff = back_dish_d - 2.0*t_cum
+        layer_shape_Z = make_dish_layer_solid(d_eff, back_dish_depth, t_i, steps_profile)
+        layer_shape_X = place_shape(layer_shape_Z, pos=apex, rot_axis=App.Vector(0,1,0), rot_deg=90)
+        obj = add_part(doc, layer_shape_X, f"DishLayer_{i+1}", color=rgb, transparency=(1.0-alpha))
+        if obj: objs.append(obj)
+        t_cum += t_i
+
+    # 2) Aro toroidal en el borde del plato
+    R_major = back_dish_d/2.0
+    r_minor = t_bumper_ring/2.0
+    torus = Part.makeTorus(R_major, r_minor)
+    torus_X = place_shape(torus, pos=apex.add(App.Vector(back_dish_depth,0,0)), 
+                          rot_axis=App.Vector(0,1,0), rot_deg=90)
+    objs.append(add_part(doc, torus_X, "DishRimBumper", color=(0.41,0.41,0.41), transparency=0.05))
+
+    # 3) Ring soporte (hueco), alineado con eje X
+    ring_Z = make_ring(18.0, 14.0, 3.0)
+    ring_X = place_shape(ring_Z, pos=App.Vector(apex_x, 0, 0), rot_axis=App.Vector(0,1,0), rot_deg=90)
+    objs.append(add_part(doc, ring_X, "RearRing", color=(0.75,0.75,0.75), transparency=0))
+
+    # 4) Boom trasero (eje X) y punta
+    boom_base_x = -p_bus_w/2.0 - 10.0 - boom_len_back
+    boom_cyl = Part.makeCylinder(boom_r, boom_len_back, App.Vector(boom_base_x,0,0), App.Vector(1,0,0))
+    objs.append(add_part(doc, boom_cyl, "RearBoom", color=(0.75,0.75,0.75), transparency=0))
+
+    tip_sphere = Part.makeSphere(boom_tip_r, App.Vector(boom_base_x,0,0))
+    objs.append(add_part(doc, tip_sphere, "BoomTip", color=(0.80,0.80,0.20), transparency=0))
+
+    return [o for o in objs if o is not None]
+
+def build_parker_probe(doc):
+    objs = []
+    objs += build_bus(doc)
+    objs += build_heat_shield(doc)
+    objs += build_paddle(doc, side=+1)
+    objs += build_paddle(doc, side=-1)
+    objs += build_radiator(doc, side=+1)
+    objs += build_radiator(doc, side=-1)
+    objs += build_cooling_loops(doc)
+    objs += build_faraday_cup(doc)
+    objs += build_whips(doc)
+    objs += build_rear_assembly(doc)
+    return objs
+
+
+doc = App.newDocument("ParkerProbe")
+
+objs = build_parker_probe(doc)
+doc.recompute()
+
+try:
+    Part.export(objs, export_path)
+    App.Console.PrintMessage("Exportado STEP en: {}\n".format(export_path))
+except Exception as e:
+    App.Console.PrintError("Error exportando STEP: {}\n".format(e))
