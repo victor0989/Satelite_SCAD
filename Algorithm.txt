@@ -1,0 +1,80 @@
+BEGIN MODULE GAPV_MAIN
+
+  // --------------------------
+  // [1] INITIALIZE SYSTEM DATA
+  // --------------------------
+  DEFINE PlasmaShellState AS STRUCT:
+      float temperature
+      float pressure
+      Vector3 velocity
+      Tensor EM_Field_Tensor
+      Tensor Stress_Energy_Tensor
+  END STRUCT
+
+  DEFINE MetricField AS STRUCT:
+      Tensor g_mu_nu         // Local spacetime metric
+      Tensor RiemannTensor   // Curvature tensor
+      float gravityGradient  // dΦ/dr
+  END STRUCT
+
+  DEFINE Spacecraft AS STRUCT:
+      PlasmaShellState plasma
+      MetricField localMetric
+      float structuralIntegrity
+      Function AdaptiveControl()
+      Function CurvatureNavigation()
+  END STRUCT
+
+  // --------------------------
+  // [2] PLASMA-METRIC COUPLING
+  // --------------------------
+  FUNCTION AdaptiveControl(plasma, metric):
+      UPDATE plasma.Stress_Energy_Tensor USING:
+          T^{μν} = (ρ + p)u^μu^ν + p g^{μν} + F^{μλ}F^ν_λ - (1/4)g^{μν}F²
+
+      IF metric.gravityGradient > threshold THEN
+          ALTER plasma.geometry TO elongate along minimal curvature axis
+          ENHANCE EM_Field_Tensor FOR ADDITIONAL CONFINEMENT
+      END IF
+
+      RETURN plasma
+  END FUNCTION
+
+  // --------------------------
+  // [3] NAVIGATION VIA CURVATURE
+  // --------------------------
+  FUNCTION CurvatureNavigation(plasma, metric):
+      COMPUTE ∇_μ T^{μν} = 0   // Energy-momentum conservation
+      IF plasma deformation produces directional anisotropy THEN
+          COMPUTE net_force_direction FROM gradient(T^{μν})
+          SET trajectory_vector TO follow geodesic(metric.g_mu_nu, net_force_direction)
+      END IF
+
+      RETURN trajectory_vector
+  END FUNCTION
+
+  // --------------------------
+  // [4] SIMULATION LOOP
+  // --------------------------
+  FUNCTION MainSimulationLoop():
+      INITIALIZE GAPV AS Spacecraft
+
+      LOOP WHILE GAPV.structuralIntegrity > safe_limit:
+          GAPV.plasma = AdaptiveControl(GAPV.plasma, GAPV.localMetric)
+          trajectory = CurvatureNavigation(GAPV.plasma, GAPV.localMetric)
+
+          UPDATE GAPV.position ALONG trajectory
+          MONITOR plasma.temperature AND curvature feedback
+
+          IF plasma unstable THEN
+              EMIT WARNING "PLASMA DECOUPLING DETECTED"
+              ACTIVATE CONTAINMENT FIELD BOOST
+          END IF
+      END LOOP
+
+      OUTPUT "SIMULATION COMPLETE: Final Position Reached"
+  END FUNCTION
+
+  CALL MainSimulationLoop()
+
+END MODULE
