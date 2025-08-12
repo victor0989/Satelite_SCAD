@@ -1,0 +1,355 @@
+# ============================================================
+# FreeCAD macro: Sonda espacial tipo Parker (paramétrica)
+# Autor: Víctor + Copilot
+# Probado en: FreeCAD 0.20+ (Workbench Part)
+# ============================================================
+
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part, math
+from FreeCAD import Vector
+
+# ---------------------------
+# Parámetros principales
+# ---------------------------
+P = dict(
+    # Bus (cuerpo)
+    p_bus_w = 90.0, p_bus_d = 90.0, p_bus_h = 120.0,
+
+    # Escudo térmico
+    shield_d = 220.0, shield_thk = 12.0, shield_cone = 22.0,
+    shield_gap = 28.0, shield_back_standoff = 10.0,
+
+    # Paneles solares
+    paddle_len = 85.0, paddle_root_w = 44.0, paddle_tip_w = 26.0, paddle_t = 2.0,
+    paddle_y_offset = 90.0/2 - 8.0,
+    auto_paddle_tilt = True,
+    paddle_tilt_deg = 22.0, tilt_min = 5.0, tilt_max = 75.0, tilt_gain = 1.1, tilt_bias = 30.0,
+
+    # Radiadores
+    radiator_w = 80.0, radiator_h = 120.0, radiator_t = 2.2,
+    radiator_back_offset = 46.0,
+
+    # Instrumentos
+    back_dish_d = 50.0, back_dish_depth = 10.0,
+    boom_len_back = 140.0, boom_tip_r = 3.0,
+    faraday_len = 48.0, faraday_r = 12.0,
+    whip_len = 160.0, whip_r = 0.9,
+
+    # Sol (para auto tilt simple)
+    sun_az_deg = 0.0,  # 0° = +X
+    sun_el_deg = 0.0,  # 0° = plano XY
+
+    # Resoluciones
+    prof_steps = 48
+)
+
+# ---------------------------
+# Helpers de color y colocación
+# ---------------------------
+def add_part(doc, shape, name, color=(0.8,0.8,0.8), alpha=0, placement=None, parent=None):
+    obj = doc.addObject("Part::Feature", name)
+    obj.Shape = shape
+    if placement:
+        obj.Placement = placement
+    try:
+        obj.ViewObject.ShapeColor = color
+        obj.ViewObject.Transparency = alpha
+    except Exception:
+        pass
+    if parent:
+        parent.addObject(obj)
+    return obj
+
+def rot_xyz(rx=0, ry=0, rz=0):
+    Rz = App.Rotation(Vector(0,0,1), rz)
+    Ry = App.Rotation(Vector(0,1,0), ry)
+    Rx = App.Rotation(Vector(1,0,0), rx)
+    return Rz.multiply(Ry).multiply(Rx)
+
+def placement(pos=(0,0,0), rot=(0,0,0)):
+    return App.Placement(Vector(*pos), rot_xyz(*rot))
+
+def clamp(x,a,b):
+    return max(a, min(b, x))
+
+def vec_from_az_el(az_deg, el_deg):
+    az = math.radians(az_deg); el = math.radians(el_deg)
+    return (math.cos(el)*math.cos(az), math.cos(el)*math.sin(az), math.sin(el))
+
+def auto_tilt_from_sun(P):
+    sdir = vec_from_az_el(P["sun_az_deg"], P["sun_el_deg"])
+    dot = clamp(sdir[0], -1.0, 1.0)  # normal del escudo = +X
+    ang = math.degrees(math.acos(dot))
+    return clamp(P["tilt_bias"] + P["tilt_gain"]*ang, P["tilt_min"], P["tilt_max"])
+
+def fuse_all(shapes):
+    out = None
+    for s in shapes:
+        out = s if out is None else out.fuse(s)
+    return out
+
+# ---------------------------
+# Constructores geométricos
+# ---------------------------
+def make_centered_box(w,d,h):
+    box = Part.makeBox(w,d,h)
+    box.translate(Vector(-w/2, -d/2, -h/2))
+    return box
+
+def circle_wire(r, center=Vector(0,0,0), dir=Vector(0,0,1)):
+    c = Part.Circle(center, dir, r)
+    return Part.Wire(c.toShape())
+
+def loft_between_radii(r1, r2, h, axis="X", x0=0.0):
+    if axis == "X":
+        w1 = circle_wire(r1, center=Vector(x0,0,0), dir=Vector(1,0,0))
+        w2 = circle_wire(r2, center=Vector(x0+h,0,0), dir=Vector(1,0,0))
+    elif axis == "Z":
+        w1 = circle_wire(r1, center=Vector(0,0,x0), dir=Vector(0,0,1))
+        w2 = circle_wire(r2, center=Vector(0,0,x0+h), dir=Vector(0,0,1))
+    else:
+        raise ValueError("axis must be X or Z")
+    return Part.makeLoft([w1, w2], True, True)
+
+def make_parabola_dish(diam, depth, t=1.0, steps=72):
+    f = (diam*diam) / (16.0*depth + 1e-9)
+    def profile_points(offset=0.0):
+        pts = []
+        for i in range(steps+1):
+            z = depth * i/steps
+            r = max(0.0, math.sqrt(max(0.0, 4.0*f*z)) - offset)
+            pts.append(Vector(r, 0, z))
+        return pts
+    outer = Part.makePolygon(profile_points(0.0))
+    inner = Part.makePolygon(list(reversed(profile_points(t))))
+    wire = Part.Wire(outer.Edges + inner.Edges)
+    face = Part.Face(wire)
+    return face.revolve(Vector(0,0,0), Vector(0,0,1), 360)
+
+def make_polygon_face(points_xy):
+    pts = [Vector(p[0], p[1], 0) for p in points_xy]
+    poly = Part.makePolygon(pts + [pts[0]])
+    wire = Part.Wire(poly.Edges)
+    return Part.Face(wire)
+
+def extrude_face(face, thickness, center=True, axis=Vector(0,0,1)):
+    prism = face.extrude(axis.multiply(thickness))
+    if center:
+        shift = axis.normalize().multiply(thickness/2.0)
+        prism.translate(Vector(-shift.x, -shift.y, -shift.z))
+    return prism
+
+def make_offset_extrusion_from_face(face, offset, thickness, center=True):
+    """Aplica offset 2D sobre una cara plana (o compuesto) y extruye el resultado."""
+    off = face.makeOffset2D(offset)  # devuelve Face/Wire/Compound según caso
+    solids = []
+
+    def collect_and_extrude(shp):
+        st = shp.ShapeType
+        if st in ("Face", "Wire"):
+            # Si es wire, crear cara antes de extruir
+            f = shp if st == "Face" else Part.Face(shp)
+            solids.append(extrude_face(f, thickness, center=center))
+        elif st == "Compound":
+            for sub in shp.SubShapes:
+                collect_and_extrude(sub)
+
+    collect_and_extrude(off)
+    return fuse_all(solids)
+
+# ---------------------------
+# Módulos de la sonda
+# ---------------------------
+def mod_bus(P):
+    return make_centered_box(P["p_bus_w"], P["p_bus_d"], P["p_bus_h"])
+
+def mod_heat_shield_layered(P):
+    d = P["shield_d"]; th = P["shield_thk"]; cone = P["shield_cone"]
+    h1 = 1.6; h3 = 2.0; h2 = max(0.5, th - (h1 + h3))
+    r0 = d/2.0
+    r1 = r0 - cone*0.25
+    r2 = r0 - cone*0.85
+    r3 = r0 - cone
+
+    seg1 = loft_between_radii(r0, r1, h1, axis="X", x0=0.0)
+    seg2 = loft_between_radii(r1, r2, h2, axis="X", x0=h1)
+    seg3 = loft_between_radii(r2, r3, h3, axis="X", x0=h1+h2)
+    shp = seg1.fuse(seg2).fuse(seg3)
+    shp.translate(Vector(-th/2.0, 0, 0))
+    return shp
+
+def mod_tps_rim_sensors(P):
+    sensors = []
+    R = P["shield_d"]/2.0 - 6.0
+    x = P["shield_thk"]/2.0 + 2.0
+    for a in range(0, 360, 45):
+        rad = math.radians(a)
+        y = R*math.cos(rad)
+        z = R*math.sin(rad)
+        sensors.append(Part.makeSphere(2.2, Vector(x, y, z)))
+    return fuse_all(sensors)
+
+def mod_tps_support_truss(P):
+    outer = Part.makeCylinder(P["shield_d"]/2.0 - 12.0, 3.0, Vector(-1.5,0,0), Vector(1,0,0))
+    inner = Part.makeCylinder(P["shield_d"]/2.0 - 18.0, 3.2, Vector(-1.6,0,0), Vector(1,0,0))
+    ring = outer.cut(inner)
+    parts = [ring]
+    for a in range(0, 360, 60):
+        rad = math.radians(a)
+        y = (P["shield_d"]/2.0 - 18.0)*math.cos(rad)
+        z = (P["shield_d"]/2.0 - 18.0)*math.sin(rad)
+        h = P["shield_back_standoff"] + 4.0
+        parts.append(Part.makeCylinder(2.6, h, Vector(-h, y, z), Vector(1,0,0)))
+    return fuse_all(parts)
+
+def mod_parker_paddle(P, side=+1, tilt_deg=None):
+    # Geometría del panel (trapezoidal en XY, extruido en Z)
+    pts = [
+        (0.0, -P["paddle_root_w"]/2.0),
+        (0.0,  P["paddle_root_w"]/2.0),
+        (P["paddle_len"],  P["paddle_tip_w"]/2.0),
+        (P["paddle_len"], -P["paddle_tip_w"]/2.0),
+    ]
+    panel_face = make_polygon_face(pts)
+    panel = extrude_face(panel_face, P["paddle_t"], center=True)
+
+    # Borde: offset 2D sobre la cara plana, luego extruir espesor reducido
+    border = make_offset_extrusion_from_face(panel_face, 1.2, P["paddle_t"]*0.2, center=True)
+    shp = panel.fuse(border) if border else panel
+
+    # Inclinación automática o fija
+    if tilt_deg is None and P["auto_paddle_tilt"]:
+        tilt = auto_tilt_from_sun(P)
+    else:
+        tilt = P["paddle_tilt_deg"] if tilt_deg is None else tilt_deg
+
+    # Colocación en el bus
+    y_anchor = side * (P["paddle_y_offset"])
+    pl = placement(pos=(0, y_anchor, 0), rot=(tilt if side>0 else -tilt, 0, 0))
+    return shp, pl
+
+def mod_radiator(P, side=+1):
+    w = P["radiator_w"]; h = P["radiator_h"]; t = P["radiator_t"]
+    base = make_centered_box(w, t, h)
+    fins = []
+    for i in range(-3, 4):
+        fin = make_centered_box(1.2, t+0.2, h-6.0)
+        fin.translate(Vector(i*6.0, 0, 0))
+        fins.append(fin)
+    comp = base
+    for f in fins:
+        comp = comp.fuse(f)
+    x = side * (P["p_bus_w"]/2.0 + P["radiator_back_offset"])
+    pl = placement(pos=(x, 0, 0), rot=(0,90,0))
+    return comp, pl
+
+def mod_faraday_cup(P):
+    r = P["faraday_r"]; L = P["faraday_len"]
+    c1 = Part.makeCylinder(r*0.6, L*0.6)
+    c2 = Part.makeCone(r*0.6, r*0.25, L*0.4); c2.translate(Vector(0,0,L*0.6))
+    c3 = Part.makeCylinder(r*0.35, 6.0, Vector(0,0,-6.0))
+    shp = c1.fuse(c2).fuse(c3)
+    shp.rotate(Vector(0,0,0), Vector(0,1,0), 90)
+    shp.translate(Vector(P["shield_thk"]/2.0 + 8.0, 0, 0))
+    return shp
+
+def mod_fields_whips(P):
+    whips = []
+    for a in [-35, 35, 145, -145]:
+        x = P["shield_thk"]/2.0
+        y = (P["shield_d"]/2.0 - 10.0) * math.cos(math.radians(a))
+        z = (P["shield_d"]/2.0 - 10.0) * math.sin(math.radians(a))
+        rod = Part.makeCylinder(P["whip_r"], P["whip_len"])
+        rod.rotate(Vector(0,0,0), Vector(0,1,0), -10)
+        rod.rotate(Vector(0,0,0), Vector(1,0,0), -a)
+        rod.translate(Vector(x, y, z))
+        whips.append(rod)
+    return fuse_all(whips)
+
+def mod_rear_boom_and_dish(P):
+    boom = Part.makeCylinder(1.8, P["boom_len_back"], Vector(-P["boom_len_back"],0,0), Vector(1,0,0))
+    tip = Part.makeSphere(P["boom_tip_r"], Vector(-P["boom_len_back"], 0, 0))
+    boom = boom.fuse(tip)
+    ring_outer = Part.makeCylinder(18.0, 3.0, Vector(-3.0,0,0), Vector(1,0,0))
+    ring_inner = Part.makeCylinder(14.0, 3.2, Vector(-3.2,0,0), Vector(1,0,0))
+    ring = ring_outer.cut(ring_inner)
+    dish = make_parabola_dish(P["back_dish_d"], P["back_dish_depth"], t=1.0, steps=P["prof_steps"])
+    dish.rotate(Vector(0,0,0), Vector(0,1,0), 90)
+    dish.rotate(Vector(0,0,0), Vector(0,1,0), 180)
+    comp = ring.fuse(dish).fuse(boom)
+    comp.translate(Vector(-(P["p_bus_w"]/2.0 + 24.0), 0, 0))
+    return comp
+
+# ---------------------------
+# Ensamblado principal
+# ---------------------------
+def build_probe(doc, P):
+    P["paddle_y_offset"] = P["p_bus_d"]/2.0 - 8.0
+
+    grp = doc.addObject("App::Part", "SpaceProbe")
+
+    # 1) Bus
+    bus = add_part(doc, mod_bus(P), "Bus", color=(0.4,0.4,0.45), parent=grp)
+
+    # 2) Escudo térmico y soporte
+    shield = mod_heat_shield_layered(P)
+    shield.translate(Vector(P["p_bus_w"]/2.0 + P["shield_gap"], 0, 0))
+    add_part(doc, shield, "HeatShield", color=(0.98,0.98,0.98), parent=grp)
+
+    truss = mod_tps_support_truss(P)
+    truss.translate(Vector(P["p_bus_w"]/2.0 + P["shield_gap"] - P["shield_back_standoff"], 0, 0))
+    add_part(doc, truss, "ShieldTruss", color=(0.75,0.75,0.78), parent=grp)
+
+    sensors = mod_tps_rim_sensors(P)
+    sensors.translate(Vector(P["p_bus_w"]/2.0 + P["shield_gap"], 0, 0))
+    add_part(doc, sensors, "TPS_Sensors", color=(1.0,0.9,0.2), parent=grp)
+
+    # 3) Paneles solares
+    for side in (+1, -1):
+        shp, pl = mod_parker_paddle(P, side=side)
+        panel = add_part(doc, shp, f"SolarPanel_{'Top' if side>0 else 'Bottom'}",
+                         color=(0.05,0.08,0.25), parent=grp)
+        panel.Placement = pl
+        panel.Placement.Base = panel.Placement.Base.add(Vector(P["p_bus_w"]/2.0, 0, 0))
+
+    # 4) Radiadores
+    radR, plR = mod_radiator(P, side=+1)
+    add_part(doc, radR, "Radiator_Right", color=(0.92,0.92,1.0), parent=grp, placement=plR)
+    radL, plL = mod_radiator(P, side=-1)
+    add_part(doc, radL, "Radiator_Left", color=(0.92,0.92,1.0), parent=grp, placement=plL)
+
+    # 5) Faraday cup
+    faraday = mod_faraday_cup(P)
+    faraday.translate(Vector(P["p_bus_w"]/2.0 + P["shield_gap"], 0, 0))
+    add_part(doc, faraday, "FaradayCup", color=(0.75,0.75,0.80), parent=grp)
+
+    # 6) Látigos
+    whips = mod_fields_whips(P)
+    whips.translate(Vector(P["p_bus_w"]/2.0 + P["shield_gap"], 0, 0))
+    add_part(doc, whips, "FieldWhips", color=(0.85,0.85,0.9), parent=grp)
+
+    # 7) Boom y comunicaciones traseras
+    rear = mod_rear_boom_and_dish(P)
+    add_part(doc, rear, "RearComms_Boom", color=(0.8,0.8,0.85), parent=grp)
+
+    doc.recompute()
+    return grp
+
+# ---------------------------
+# Entry point
+# ---------------------------
+def main():
+    doc = App.ActiveDocument
+    if doc is None:
+        doc = App.newDocument("ParkerLike")
+    grp = build_probe(doc, P)
+    try:
+        Gui.activeView().viewAxonometric()
+        Gui.SendMsgToActiveView("ViewFit")
+    except Exception:
+        pass
+    return grp
+
+if __name__ == "__main__":
+    main()
