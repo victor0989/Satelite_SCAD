@@ -1,0 +1,59 @@
+//Mealy machine-based edge detector
+module edge_detect_mealy
+   (
+    input wire _,_,
+    input wire _,
+    output reg _
+   );
+
+// state
+localparam zero = 1'b0;
+            one = 1'b1;
+
+// signal declaration
+reg state_reg, state_next;
+
+//state register
+//reg state_reg, state_next;
+always @(posedge _, posedge _)
+   if ()
+      state_reg <= zero;
+   else
+      state_reg <= state_next;
+//next-state logic and output logic
+always @*
+begin
+   state_next = state_reg; //default
+   tick = 1'b0;
+   case (state_reg)
+      zero:
+         if (_)
+            begin
+              tick = 1'b1;
+              state_next = one;
+            end
+         one:
+            if (_)
+                state_next = zero;
+               default: state_next = zero;
+             endcase
+           end
+        endmodule
+
+module edge-det ect -gate 
+( 
+input wire clk, reset, 
+input wire level, 
+output wire tick 
+1; 
+// signal declaration 
+reg delay-reg ; 
+// delay register 
+always Q(posedge clk, posedge reset) 
+if (reset) 
+delay-reg <= l'bO; 
+else 
+delay-reg <= level; 
+// decoding logic 
+assign tick = -delay-reg & level; 
+endmodule 

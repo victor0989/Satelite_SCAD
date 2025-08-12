@@ -1,0 +1,407 @@
+# -*- coding: utf-8 -*-
+# Macro: SATELITE_AMARILLO – modelo paramétrico básico por subsistemas
+# FreeCAD Part API (probado con FreeCAD 0.19+)
+import FreeCAD as App
+import Part
+from math import radians, sin, cos
+
+DOC_NAME = "SATELITE_AMARILLO"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def get_doc():
+    doc = App.ActiveDocument
+    if doc is None or doc.Label != DOC_NAME:
+        try:
+            doc = App.getDocument(DOC_NAME)
+        except Exception:
+            doc = App.newDocument(DOC_NAME)
+    return doc
+
+def new_part(doc, label, parent=None):
+    p = doc.addObject("App::Part", label)
+    p.Label = label
+    if parent:
+        parent.addObject(p)
+    return p
+
+def add_shape(doc, shape, label, color=None, transparency=0, parent=None):
+    obj = doc.addObject("Part::Feature", label)
+    obj.Label = label
+    obj.Shape = shape
+    if color:
+        try:
+            obj.ViewObject.ShapeColor = color
+            obj.ViewObject.Transparency = transparency
+        except Exception:
+            pass
+    if parent:
+        parent.addObject(obj)
+    return obj
+
+def box_centered(L, W, H, cx=0, cy=0, cz=0):
+    # Box placed so that its center is at (cx, cy, cz)
+    b = Part.makeBox(L, W, H, App.Vector(-L/2.0 + cx, -W/2.0 + cy, -H/2.0 + cz))
+    return b
+
+def cylinder_centered(r, h, axis='Z', cx=0, cy=0, cz=0):
+    c = Part.makeCylinder(r, h)
+    if axis == 'Z':
+        p = App.Vector(cx, cy, cz - h/2.0)
+        c.translate(p)
+    elif axis == 'X':
+        # Create along Z then rotate to X
+        c = Part.makeCylinder(r, h)
+        c.rotate(App.Vector(0,0,0), App.Vector(0,1,0), 90)
+        c.translate(App.Vector(cx - h/2.0, cy, cz))
+    elif axis == 'Y':
+        c = Part.makeCylinder(r, h)
+        c.rotate(App.Vector(0,0,0), App.Vector(1,0,0), -90)
+        c.translate(App.Vector(cx, cy - h/2.0, cz))
+    return c
+
+def cone_centered(r1, r2, h, axis='Z', cx=0, cy=0, cz=0):
+    k = Part.makeCone(r1, r2, h)
+    if axis == 'Z':
+        k.translate(App.Vector(cx, cy, cz - h/2.0))
+    elif axis == 'X':
+        k.rotate(App.Vector(0,0,0), App.Vector(0,1,0), 90)
+        k.translate(App.Vector(cx - h/2.0, cy, cz))
+    elif axis == 'Y':
+        k.rotate(App.Vector(0,0,0), App.Vector(1,0,0), -90)
+        k.translate(App.Vector(cx, cy - h/2.0, cz))
+    return k
+
+def sphere_centered(r, cx=0, cy=0, cz=0):
+    s = Part.makeSphere(r)
+    s.translate(App.Vector(cx, cy, cz))
+    return s
+
+def plate_on_face(L, W, t, face='+X', base_box=(1500,900,900), offset=0):
+    Lb, Wb, Hb = base_box
+    if face == '+X':
+        cx = Lb/2.0 + t/2.0 + offset
+        cy = 0
+        cz = 0
+        shape = box_centered(t, W, L, cx, cy, cz)  # t along X
+        shape.rotate(App.Vector(0,0,0), App.Vector(0,1,0), 90)
+    elif face == '-X':
+        cx = -Lb/2.0 - t/2.0 - offset
+        cy = 0
+        cz = 0
+        shape = box_centered(t, W, L, cx, cy, cz)
+        shape.rotate(App.Vector(0,0,0), App.Vector(0,1,0), 90)
+    elif face == '+Y':
+        cx = 0
+        cy = Wb/2.0 + t/2.0 + offset
+        cz = 0
+        shape = box_centered(L, t, W, cx, cy, cz)
+        shape.rotate(App.Vector(0,0,0), App.Vector(1,0,0), 90)
+    elif face == '-Y':
+        cx = 0
+        cy = -Wb/2.0 - t/2.0 - offset
+        cz = 0
+        shape = box_centered(L, t, W, cx, cy, cz)
+        shape.rotate(App.Vector(0,0,0), App.Vector(1,0,0), 90)
+    elif face == '+Z':
+        cx = 0
+        cy = 0
+        cz = Hb/2.0 + t/2.0 + offset
+        shape = box_centered(L, W, t, cx, cy, cz)
+    else: # '-Z'
+        cx = 0
+        cy = 0
+        cz = -Hb/2.0 - t/2.0 - offset
+        shape = box_centered(L, W, t, cx, cy, cz)
+    return shape
+
+def color_rgb(r,g,b):
+    return (r/255.0, g/255.0, b/255.0)
+
+# ---------------------------------------------------------------------------
+# Parámetros
+# ---------------------------------------------------------------------------
+P = {
+    # Estructura principal (SM)
+    'SM_L': 1500.0, 'SM_W': 900.0, 'SM_H': 900.0,
+    'MLI_t': 3.0, 'Panel_int_t': 8.0,
+
+    # Payload esfera
+    'PM_D': 800.0, 'PM_clear': 50.0,
+
+    # Energía
+    'SA_arm_L': 800.0, 'SA_arm_D': 80.0,
+    'SA_panel_L': 2000.0, 'SA_panel_W': 900.0, 'SA_panel_t': 30.0,
+
+    # Comunicaciones
+    'HGA_D': 600.0, 'HGA_depth': 200.0,
+    'LGA_D': 150.0, 'LGA_H': 100.0,
+    'Mono_D': 30.0, 'Mono_L': 1200.0,
+
+    # Propulsión
+    'Tank_D': 300.0, 'Tank_L': 800.0,
+    'RCS_D': 80.0, 'RCS_L': 120.0,
+    'Main_D': 200.0, 'Main_L': 300.0,
+    'Pipe_D': 25.0,
+
+    # Sensores
+    'Cam_L': 200.0, 'Cam_W': 200.0, 'Cam_H': 150.0, 'Lens_D': 80.0, 'Lens_L': 40.0,
+    'Mast_L': 1000.0, 'Mast_D': 50.0, 'Head_D': 80.0, 'Head_L': 50.0,
+    'ST_L': 150.0, 'ST_W': 150.0, 'ST_H': 120.0,
+    'Sun_L': 100.0, 'Sun_W': 100.0, 'Sun_t': 20.0,
+
+    # Internos
+    'OBC_L': 300.0, 'OBC_W': 250.0, 'OBC_H': 80.0,
+    'Batt_L': 400.0, 'Batt_W': 300.0, 'Batt_H': 200.0,
+    'Reg_L': 250.0, 'Reg_W': 150.0, 'Reg_H': 50.0,
+    'Rad_L': 800.0, 'Rad_W': 600.0, 'Rad_t': 20.0,
+
+    # Mecanismos
+    'Hinge_L': 100.0, 'Hinge_W': 60.0, 'Hinge_H': 20.0,
+    'Bracket_L': 30.0, 'Bracket_W': 30.0, 'Bracket_t': 5.0,
+    'Cover_L': 400.0, 'Cover_W': 300.0, 'Cover_t': 5.0,
+}
+
+SM = (P['SM_L'], P['SM_W'], P['SM_H'])
+
+# ---------------------------------------------------------------------------
+# Construcción
+# ---------------------------------------------------------------------------
+doc = get_doc()
+
+# Raíz
+root = new_part(doc, "SATELITE_AMARILLO")
+
+# 1. ESTRUCTURA PRINCIPAL
+estructura = new_part(doc, "1_ESTRUCTURA_PRINCIPAL", root)
+# Bastidor (SM)
+sm_shape = box_centered(P['SM_L'], P['SM_W'], P['SM_H'], 0, 0, 0)
+sm = add_shape(doc, sm_shape, "Bastidor_central", color_rgb(210,210,210), 0, estructura)
+
+# MLI como “chaqueta” del SM (caja un poco mayor menos SM)
+mli_outer = box_centered(P['SM_L'] + 2*P['MLI_t'], P['SM_W'] + 2*P['MLI_t'], P['SM_H'] + 2*P['MLI_t'])
+mli_shell = mli_outer.cut(sm_shape)
+mli = add_shape(doc, mli_shell, "Aislantes_MLI", color_rgb(255,223,128), 60, estructura)
+
+# Paneles internos (ejemplo: dos diafragmas YZ)
+pi1 = add_shape(doc, box_centered(P['Panel_int_t'], P['SM_W']*0.9, P['SM_H']*0.9, -P['SM_L']*0.2, 0, 0),
+                "Panel_soporte_interno_1", color_rgb(180,200,230), 70, estructura)
+pi2 = add_shape(doc, box_centered(P['Panel_int_t'], P['SM_W']*0.9, P['SM_H']*0.9, P['SM_L']*0.2, 0, 0),
+                "Panel_soporte_interno_2", color_rgb(180,200,230), 70, estructura)
+
+# 2. MODULOS
+modulos = new_part(doc, "2_MODULOS", root)
+
+# Payload Module (esfera)
+pm_r = P['PM_D']/2.0
+pm_cx = P['SM_L']/2.0 + P['PM_clear'] + pm_r
+pm = add_shape(doc, sphere_centered(pm_r, pm_cx, 0, 0), "Modulo_presurizado_payload",
+               color_rgb(180,180,255), 0, modulos)
+
+# Bloques laterales de instrumentación (dos por lado)
+blk_shape = box_centered(300, 200, 200)
+# Colocaciones relativas en ±Y, a media altura, en ±X/0
+blk_offsets = [
+    ( -P['SM_L']*0.15,  P['SM_W']/2.0 + 100,  150),
+    (  P['SM_L']*0.15,  P['SM_W']/2.0 + 100, -150),
+    ( -P['SM_L']*0.15, -P['SM_W']/2.0 - 100, -150),
+    (  P['SM_L']*0.15, -P['SM_W']/2.0 - 100,  150),
+]
+for i,(x,y,z) in enumerate(blk_offsets, start=1):
+    s = blk_shape.copy()
+    s.translate(App.Vector(x, y, z))
+    add_shape(doc, s, f"Bloque_instrumentacion_{i}", color_rgb(200,200,200), 0, modulos)
+
+# 3. ENERGIA
+energia = new_part(doc, "3_ENERGIA", root)
+# Brazos de soporte (±Y)
+arm_r = P['SA_arm_D']/2.0
+arm_L = P['SA_arm_L']
+# Emerge desde la cara ±Y del SM
+arm_y = P['SM_W']/2.0 + arm_L/2.0
+armL = add_shape(doc, cylinder_centered(arm_r, arm_L, 'Y', 0,  arm_y, 0),
+                 "Brazo_soporte_izq", color_rgb(160,160,160), 0, energia)
+armR = add_shape(doc, cylinder_centered(arm_r, arm_L, 'Y', 0, -arm_y, 0),
+                 "Brazo_soporte_der", color_rgb(160,160,160), 0, energia)
+
+# Paneles solares
+def make_panel(side='+Y'):
+    # Centro del panel al final del brazo
+    sign = 1 if side=='+Y' else -1
+    panel_cy = sign*(P['SM_W']/2.0 + P['SA_arm_L'] + P['SA_panel_t']/2.0 + 10)
+    # Panel en el plano XZ, con largo en X
+    panel = box_centered(P['SA_panel_L'], P['SA_panel_t'], P['SA_panel_W'], 0, panel_cy, 0)
+    return panel
+
+psL = add_shape(doc, make_panel('+Y'), "Panel_solar_izquierdo", color_rgb(40,80,200), 20, energia)
+psR = add_shape(doc, make_panel('-Y'), "Panel_solar_derecho",  color_rgb(40,80,200), 20, energia)
+
+# 4. COMUNICACIONES
+comms = new_part(doc, "4_COMUNICACIONES", root)
+
+# HGA (parábola simple como calota esférica)
+hga_R = P['HGA_D']/2.0
+hga_depth = P['HGA_depth']
+# Calota: esfera grande cortada por plano para simular plato
+sphere_big = sphere_centered(hga_R, 0, 0, 0)
+cut_plane = box_centered(2*hga_R+1, 2*hga_R+1, hga_R, 0, 0, -hga_depth/2.0)  # corta parte trasera
+dish = sphere_big.cut(cut_plane)
+# Posición HGA frente al SM, cercano al PM
+hga_cx = P['SM_L']/2.0 + 150
+hga_cy = -200
+hga_cz = 100
+dish.translate(App.Vector(hga_cx, hga_cy, hga_cz))
+hga = add_shape(doc, dish, "Antena_alta_ganancia", color_rgb(220,220,255), 0, comms)
+
+# Soporte de HGA (cuello + feed)
+hga_neck = cylinder_centered(40, 180, 'X', hga_cx - 130, hga_cy, hga_cz)
+add_shape(doc, hga_neck, "HGA_Soporte", color_rgb(150,150,150), 0, comms)
+hga_feed = cylinder_centered(10, 120, 'X', hga_cx + 40, hga_cy, hga_cz)
+add_shape(doc, hga_feed, "HGA_Feed", color_rgb(180,180,180), 0, comms)
+
+# LGA (dos pequeños cilindros en la cara superior)
+for i, yoff in enumerate([-200, 200], start=1):
+    lga = cylinder_centered(P['LGA_D']/2.0, P['LGA_H'], 'Z',
+                            -200, yoff, P['SM_H']/2.0 + P['LGA_H']/2.0 + 5)
+    add_shape(doc, lga, f"Antena_baja_ganancia_{i}", color_rgb(210,210,240), 0, comms)
+
+# Antena monopolo (látigo) en la parte superior, cerca de +X
+mono = cylinder_centered(P['Mono_D']/2.0, P['Mono_L'], 'Z',
+                         P['SM_L']/2.0 - 150, 0, P['SM_H']/2.0 + P['Mono_L']/2.0 + 10)
+add_shape(doc, mono, "Antena_monopolo", color_rgb(180,180,220), 0, comms)
+
+# 5. PROPULSION
+prop = new_part(doc, "5_PROPULSION", root)
+
+# Tanques (dos en paralelo bajo el SM, eje X)
+tank_r = P['Tank_D']/2.0
+tank_L = P['Tank_L']
+tank_z = -P['SM_H']/2.0 - tank_r - 40
+tank_y_off = 200
+t1 = cylinder_centered(tank_r, tank_L, 'X', 0,  tank_y_off, tank_z)
+t2 = cylinder_centered(tank_r, tank_L, 'X', 0, -tank_y_off, tank_z)
+add_shape(doc, t1, "Tanque_combustible_1", color_rgb(180,200,200), 0, prop)
+add_shape(doc, t2, "Tanque_combustible_2", color_rgb(180,200,200), 0, prop)
+
+# Motores principales (dos boquillas bajo el SM)
+main_r = P['Main_D']/2.0
+main_L = P['Main_L']
+m1 = cylinder_centered(main_r, main_L, 'Z', -200, 0, -P['SM_H']/2.0 - main_L/2.0 - 20)
+m2 = cylinder_centered(main_r, main_L, 'Z',  200, 0, -P['SM_H']/2.0 - main_L/2.0 - 20)
+add_shape(doc, m1, "Motor_principal_1", color_rgb(120,120,140), 0, prop)
+add_shape(doc, m2, "Motor_principal_2", color_rgb(120,120,140), 0, prop)
+
+# RCS (4 unidades en las esquinas del SM, apuntando 45°)
+rcs_r = P['RCS_D']/2.0
+rcs_L = P['RCS_L']
+corner = [
+    ( P['SM_L']/2.0,  P['SM_W']/2.0,  P['SM_H']/2.0),
+    ( P['SM_L']/2.0, -P['SM_W']/2.0,  P['SM_H']/2.0),
+    (-P['SM_L']/2.0,  P['SM_W']/2.0, -P['SM_H']/2.0),
+    (-P['SM_L']/2.0, -P['SM_W']/2.0, -P['SM_H']/2.0),
+]
+for i,(x,y,z) in enumerate(corner, start=1):
+    # pequeño desplazamiento hacia afuera
+    x += 60 if x>0 else -60
+    y += 60 if y>0 else -60
+    z += 60 if z>0 else -60
+    thr = cylinder_centered(rcs_r, rcs_L, 'X', x, y, z)
+    # rotaciones simples para sugerir orientación
+    obj = add_shape(doc, thr, f"Motor_RCS_{i}", color_rgb(140,140,160), 0, prop)
+
+# Tubería simple entre tanque y motor principal
+pipe_r = P['Pipe_D']/2.0
+pipe_L = 400.0
+pipe1 = cylinder_centered(pipe_r, pipe_L, 'Y', -200, (tank_y_off + 0)/2.0, tank_z + 100)
+add_shape(doc, pipe1, "Tuberia_valvula_1", color_rgb(200,200,160), 0, prop)
+
+# 6. SENSORES
+sens = new_part(doc, "6_SENSORES", root)
+
+# Cámara óptica principal (caja + lente)
+cam = box_centered(P['Cam_L'], P['Cam_W'], P['Cam_H'],
+                   P['SM_L']/2.0 + 250, -200, 50)
+add_shape(doc, cam, "Camara_optica_principal", color_rgb(160,170,220), 0, sens)
+lens = cylinder_centered(P['Lens_D']/2.0, P['Lens_L'], 'X',
+                         P['SM_L']/2.0 + 250 + P['Cam_L']/2.0 + P['Lens_L']/2.0,
+                         -200, 50)
+add_shape(doc, lens, "Lente_camara", color_rgb(120,130,200), 0, sens)
+
+# Mástil con sensor (lateral inferior)
+mast = cylinder_centered(P['Mast_D']/2.0, P['Mast_L'], 'Y',
+                         -450, -P['SM_W']/2.0 - P['Mast_L']/2.0 - 40, -200)
+add_shape(doc, mast, "Mastil_sensor", color_rgb(150,150,180), 0, sens)
+head = cylinder_centered(P['Head_D']/2.0, P['Head_L'], 'Y',
+                         -450, -P['SM_W']/2.0 - P['Mast_L'] - 40 - P['Head_L']/2.0, -200)
+add_shape(doc, head, "Cabezal_sensor", color_rgb(180,180,210), 0, sens)
+
+# Star trackers (dos en la parte superior alejados de obstrucciones)
+st1 = box_centered(P['ST_L'], P['ST_W'], P['ST_H'],
+                   -300,  250,  P['SM_H']/2.0 + P['ST_H']/2.0 + 10)
+st2 = box_centered(P['ST_L'], P['ST_W'], P['ST_H'],
+                   -300, -250,  P['SM_H']/2.0 + P['ST_H']/2.0 + 10)
+add_shape(doc, st1, "Star_tracker_1", color_rgb(170,200,220), 0, sens)
+add_shape(doc, st2, "Star_tracker_2", color_rgb(170,200,220), 0, sens)
+
+# Sensores solares (4 panelitos en caras laterales)
+sun_pos = [
+    ('+X', 40), ('-X', 40), ('+Y', 40), ('-Y', 40)
+]
+for i,(face,off) in enumerate(sun_pos, start=1):
+    sh = plate_on_face(P['Sun_L'], P['Sun_W'], P['Sun_t'], face, SM, off)
+    add_shape(doc, sh, f"Sensor_solar_{i}", color_rgb(240,240,130), 0, sens)
+
+# 7. SISTEMAS INTERNOS
+internos = new_part(doc, "7_SISTEMOS_INTERNOS", root)
+
+# OBC (interior)
+obc = box_centered(P['OBC_L'], P['OBC_W'], P['OBC_H'], -200, 0, 0)
+add_shape(doc, obc, "OBC", color_rgb(200,180,200), 0, internos)
+
+# Baterías (2)
+b1 = box_centered(P['Batt_L'], P['Batt_W'], P['Batt_H'], 200,  150, -150)
+b2 = box_centered(P['Batt_L'], P['Batt_W'], P['Batt_H'], 200, -150, -150)
+add_shape(doc, b1, "Bateria_1", color_rgb(180,180,180), 0, internos)
+add_shape(doc, b2, "Bateria_2", color_rgb(180,180,180), 0, internos)
+
+# Reguladores
+reg = box_centered(P['Reg_L'], P['Reg_W'], P['Reg_H'], 0, 0, 150)
+add_shape(doc, reg, "Controlador_energia", color_rgb(190,200,190), 0, internos)
+
+# Radiadores (dos placas exteriores en ±X)
+rad1 = plate_on_face(P['Rad_L'], P['Rad_W'], P['Rad_t'], '+X', SM, 10)
+rad2 = plate_on_face(P['Rad_L'], P['Rad_W'], P['Rad_t'], '-X', SM, 10)
+add_shape(doc, rad1, "Radiador_1", color_rgb(220,240,255), 30, internos)
+add_shape(doc, rad2, "Radiador_2", color_rgb(220,240,255), 30, internos)
+
+# 8. ELEMENTOS MECANICOS
+mecanicos = new_part(doc, "8_ELEMENTOS_MECANICOS", root)
+
+# Bisagras en la unión brazo-panel (representación simple)
+hingeL = box_centered(P['Hinge_L'], P['Hinge_W'], P['Hinge_H'],
+                      0,  P['SM_W']/2.0 + P['SA_arm_L'] + 5, 0)
+hingeR = box_centered(P['Hinge_L'], P['Hinge_W'], P['Hinge_H'],
+                      0, -P['SM_W']/2.0 - P['SA_arm_L'] - 5, 0)
+add_shape(doc, hingeL, "Bisagra_despliegue_izq", color_rgb(160,160,160), 0, mecanicos)
+add_shape(doc, hingeR, "Bisagra_despliegue_der", color_rgb(160,160,160), 0, mecanicos)
+
+# Soportes y abrazaderas (ejemplo en tanques)
+for i,(x,y,z) in enumerate([(-200, tank_y_off, tank_z), (200, tank_y_off, tank_z),
+                            (-200,-tank_y_off, tank_z), (200,-tank_y_off, tank_z)], start=1):
+    br = box_centered(P['Bracket_L'], P['Bracket_W'], P['Bracket_t'], x, y, z + 20)
+    add_shape(doc, br, f"Soporte_abrazadera_{i}", color_rgb(150,150,150), 0, mecanicos)
+
+# Cubiertas de acceso (dos tapas en +Z)
+cov1 = box_centered(P['Cover_L'], P['Cover_W'], P['Cover_t'], -250, 0, P['SM_H']/2.0 + P['Cover_t']/2.0 + 2)
+cov2 = box_centered(P['Cover_L'], P['Cover_W'], P['Cover_t'],  250, 0, P['SM_H']/2.0 + P['Cover_t']/2.0 + 2)
+add_shape(doc, cov1, "Cubierta_acceso_1", color_rgb(200,200,200), 0, mecanicos)
+add_shape(doc, cov2, "Cubierta_acceso_2", color_rgb(200,200,200), 0, mecanicos)
+
+# Refinar y recomputar
+try:
+    doc.recompute()
+except Exception:
+    pass
+
+print("SATELITE_AMARILLO: modelo creado.")
